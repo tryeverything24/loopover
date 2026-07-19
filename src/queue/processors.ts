@@ -448,7 +448,7 @@ export {
 // Nothing in this file calls processJob itself, so this is a pure re-export (no separate import needed).
 export { processJob } from "./job-dispatch";
 import { isVisualPath } from "../review/visual/paths";
-import { buildCapture, fetchExternalScreenshotContentBlock, fetchShotContentBlock, hasSuccessfulBotCapture, resolveVisualRoutes, type CaptureRoute } from "../review/visual/capture";
+import { buildCapture, fetchExternalScreenshotContentBlock, fetchShotContentBlock, hasSuccessfulBotCapture, resolveVisualRoutes, type CaptureInteractionRoute, type CaptureRoute } from "../review/visual/capture";
 import { MAX_PREVIEW_POLL_ATTEMPTS } from "../review/visual/preview-poll-budget";
 import {
   clearFallbackDispatchMarker,
@@ -10298,6 +10298,7 @@ async function maybePublishPrPublicSurface(
       // NEVER sink the review — it just omits the "Visual preview" section. Flag-OFF (default) ⇒ this block is
       // skipped entirely and the unified comment is byte-identical.
       let beforeAfter: CaptureRoute[] = [];
+      let interactionPreviews: CaptureInteractionRoute[] = [];
       const visualFiles = unifiedFiles
         .map((file) => file.path)
         .filter(isVisualPath);
@@ -10325,9 +10326,10 @@ async function maybePublishPrPublicSurface(
           // ordinary "nothing found" capture would, with no separate code path to maintain.
           const capture =
             reviewVisualConfig.enabled === false
-              ? { routes: [], previewPending: false }
+              ? { routes: [], interactions: [], previewPending: false }
               : await buildCapture(env, token, captureTarget, visualFiles, githubRateLimitAdmissionKeyForInstallation(installationId), reviewVisualConfig);
           beforeAfter = capture.routes;
+          interactionPreviews = capture.interactions;
           // Screenshot-table gate satisfaction (#4110): a successful capture (a real before+after render pair
           // on at least one route) is evidence equivalent to a hand-authored before/after table -- persist the
           // head SHA it was proven at so the LATER maintenance pass (runAgentMaintenancePlanAndExecute, which
@@ -10532,6 +10534,7 @@ async function maybePublishPrPublicSurface(
           ? { generateTestsLabel: `${PR_PANEL_GENERATE_TESTS_MARKER} **[BETA]** Generate an AI Playwright test for this PR` }
           : {}),
         ...(beforeAfter.length > 0 ? { beforeAfter } : {}),
+        ...(interactionPreviews.length > 0 ? { interactions: interactionPreviews } : {}),
         ...(changedFilesSummaryEnabledForReview
           ? {
               changedFilesSummary: unifiedFiles.map((file) => ({
