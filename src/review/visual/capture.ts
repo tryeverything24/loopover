@@ -523,8 +523,23 @@ async function captureInteractionGif(
 ): Promise<string | undefined> {
   if (!page) return undefined;
   if (!env.REVIEW_AUDIT || (!env.PUBLIC_API_ORIGIN && !env.REVIEW_AUDIT_S3_PUBLIC_URL)) return undefined;
+  // JSON.stringify an array (not bare `:`-joined interpolation, unlike captureScrollGif's fingerprint above,
+  // which has no arbitrary-text fields) -- selector/dragTo are maintainer-authored free text that can itself
+  // contain ":", so a bare-delimiter join can collide (`{selector:"x:drag", dragTo:"y"}` and
+  // `{selector:"x", dragTo:"drag:y"}` would otherwise both produce "...x:drag:drag:y..."). JSON's own string
+  // quoting makes each array element self-delimiting, so two distinct field tuples can never hash identically.
   const fingerprint = await sha256Hex(
-    `${target.headSha ?? target.prNumber}:interactiongif:${slot}:${interaction.selector}:${interaction.action}${interaction.action === "drag" && interaction.dragTo ? `:${interaction.dragTo}` : ""}:${page}${theme ? `:${theme}` : ""}${theme && themeStorageKey ? `:${themeStorageKey}` : ""}`,
+    JSON.stringify([
+      target.headSha ?? target.prNumber,
+      "interactiongif",
+      slot,
+      interaction.selector,
+      interaction.action,
+      interaction.action === "drag" ? (interaction.dragTo ?? null) : null,
+      page,
+      theme ?? null,
+      theme && themeStorageKey ? themeStorageKey : null,
+    ]),
   );
   const key = `${NAMESPACE}/shots/${fingerprint.slice(0, 40)}.gif`;
   const url = resolveShotUrl(env, key);
@@ -778,14 +793,27 @@ export async function buildCapture(env: Env, token: string, target: CaptureTarge
   // a GIF -- self-host only, same as the scroll-GIF path above.
   const interactionsConfigured = (visualConfig?.interactions ?? []).slice(0, MAX_INTERACTIONS);
   const interactionRoutes: CaptureInteractionRoute[] = [];
+  // Interactions aren't multiplied per-theme (see comment above) -- when review.visual.themes configures more
+  // than one, the first configured theme is what interaction GIFs render in; themes[0] is `undefined` by
+  // default (no theme config), matching every other un-emulated default capture in this file.
+  const interactionTheme = themes[0];
   if (interactionsConfigured.length > 0 && isScrollGifAvailable()) {
     for (const interaction of interactionsConfigured) {
       const interactionPath = interaction.path ?? "/";
-      const beforePage = prodBase ? joinUrl(prodBase, interactionPath) : "";
       const afterPage = previewBase ? joinUrl(previewBase, interactionPath) : "";
+      // SECURITY (#interaction-gif-capture): click/drag are real, state-mutating browser actions -- a genuine
+      // click event, or a real mouse-down/move/up drag sequence -- unlike hover, which can never trigger a
+      // click handler, form submit, or same-origin mutating request. Running click/drag against `prodBase`
+      // (the repo's PRODUCTION origin, see this function's own "before = production" comment above) would
+      // fire that real action against the LIVE SITE on every qualifying commit of every PR that touches a
+      // visual path, for as long as a maintainer has one configured -- the existing isSafeHttpUrl/
+      // isAllowedUrl SSRF guard only validates a URL is safe to NAVIGATE to, it has no concept of "this
+      // specific action is safe to perform" once there. hover never mutates state, so it's the only action
+      // still captured against production (real before/after comparison value); click/drag are preview-only.
+      const beforePage = interaction.action === "hover" && prodBase ? joinUrl(prodBase, interactionPath) : "";
       const [beforeGifUrl, afterGifUrl] = await Promise.all([
-        captureInteractionGif(env, target, beforePage, "before", interaction),
-        afterPage ? captureInteractionGif(env, target, afterPage, "after", interaction) : Promise.resolve<string | undefined>(undefined),
+        beforePage ? captureInteractionGif(env, target, beforePage, "before", interaction, interactionTheme, themeStorageKey) : Promise.resolve<string | undefined>(undefined),
+        afterPage ? captureInteractionGif(env, target, afterPage, "after", interaction, interactionTheme, themeStorageKey) : Promise.resolve<string | undefined>(undefined),
       ]);
       if (beforeGifUrl || afterGifUrl) {
         interactionRoutes.push({

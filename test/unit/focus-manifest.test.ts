@@ -5285,6 +5285,102 @@ describe("review.visual.actions_fallback (#4112 GitHub-Actions build-and-serve f
   });
 });
 
+describe("review.visual.interactions (#interaction-gif-capture)", () => {
+  it("parses a hover entry (selector + action + label), marks present, and round-trips", () => {
+    const m = parseFocusManifest({
+      review: { visual: { interactions: [{ selector: ".blocks-row", action: "hover", label: "Blocks row hover" }] } },
+    });
+    expect(m.review.visual.interactions).toEqual([{ selector: ".blocks-row", action: "hover", dragTo: null, path: null, label: "Blocks row hover" }]);
+    expect(m.review.present).toBe(true);
+    expect(reviewConfigToJson(m.review)).toEqual({ visual: { interactions: [{ selector: ".blocks-row", action: "hover", label: "Blocks row hover" }] } });
+  });
+
+  it("parses a drag entry (selector + action + drag_to + path), and round-trips drag_to/path too", () => {
+    const m = parseFocusManifest({
+      review: { visual: { interactions: [{ selector: ".card", action: "drag", drag_to: ".done-column", path: "/board" }] } },
+    });
+    expect(m.review.visual.interactions).toEqual([{ selector: ".card", action: "drag", dragTo: ".done-column", path: "/board", label: null }]);
+    expect(reviewConfigToJson(m.review)).toEqual({ visual: { interactions: [{ selector: ".card", action: "drag", drag_to: ".done-column", path: "/board" }] } });
+  });
+
+  it("absent interactions defaults to [] and does not mark review present on its own", () => {
+    expect(parseFocusManifest({}).review.visual.interactions).toEqual([]);
+    expect(parseFocusManifest({ review: { visual: {} } }).review.present).toBe(false);
+  });
+
+  it("interactions: [] does not mark review present, so the whole review block round-trips to null", () => {
+    const m = parseFocusManifest({ review: { visual: { interactions: [] } } });
+    expect(m.review.visual.interactions).toEqual([]);
+    expect(reviewConfigToJson(m.review)).toBeNull();
+  });
+
+  it("warns and drops the whole list when review.visual.interactions is not an array", () => {
+    const bad = parseFocusManifest({ review: { visual: { interactions: "nope" } } });
+    expect(bad.review.visual.interactions).toEqual([]);
+    expect(bad.warnings.some((w) => /review\.visual\.interactions.*must be a list of interactions/.test(w))).toBe(true);
+  });
+
+  it("warns and drops a non-mapping entry (a primitive or an array) rather than failing the whole list", () => {
+    const bad = parseFocusManifest({ review: { visual: { interactions: [null, "nope", ["nested"], { selector: ".ok", action: "click" }] } } });
+    expect(bad.review.visual.interactions).toEqual([{ selector: ".ok", action: "click", dragTo: null, path: null, label: null }]);
+    expect(bad.warnings.filter((w) => /review\.visual\.interactions\[\d+\].*must be a mapping/.test(w))).toHaveLength(3);
+  });
+
+  it("warns and drops an entry with a missing selector", () => {
+    const bad = parseFocusManifest({ review: { visual: { interactions: [{ action: "hover" }] } } });
+    expect(bad.review.visual.interactions).toEqual([]);
+    expect(bad.warnings.some((w) => /review\.visual\.interactions\[0\]\.selector.*is required/.test(w))).toBe(true);
+  });
+
+  it("warns and drops an entry with a missing or non-string action", () => {
+    const missing = parseFocusManifest({ review: { visual: { interactions: [{ selector: ".x" }] } } });
+    expect(missing.review.visual.interactions).toEqual([]);
+    expect(missing.warnings.some((w) => /review\.visual\.interactions\[0\]\.action.*must be "hover", "click", or "drag"/.test(w))).toBe(true);
+
+    const nonString = parseFocusManifest({ review: { visual: { interactions: [{ selector: ".x", action: 42 }] } } });
+    expect(nonString.review.visual.interactions).toEqual([]);
+    expect(nonString.warnings.some((w) => /review\.visual\.interactions\[0\]\.action.*must be "hover", "click", or "drag"/.test(w))).toBe(true);
+  });
+
+  it("warns and drops an entry with an unrecognized action string", () => {
+    const bad = parseFocusManifest({ review: { visual: { interactions: [{ selector: ".x", action: "swipe" }] } } });
+    expect(bad.review.visual.interactions).toEqual([]);
+    expect(bad.warnings.some((w) => /review\.visual\.interactions\[0\]\.action.*must be "hover", "click", or "drag"/.test(w))).toBe(true);
+  });
+
+  it("warns and drops a drag entry missing drag_to", () => {
+    const bad = parseFocusManifest({ review: { visual: { interactions: [{ selector: ".card", action: "drag" }] } } });
+    expect(bad.review.visual.interactions).toEqual([]);
+    expect(bad.warnings.some((w) => /review\.visual\.interactions\[0\]\.drag_to.*is required when action is "drag"/.test(w))).toBe(true);
+  });
+
+  it("caps the manifest-level list at MAX_VISUAL_INTERACTIONS (5), warning about the rest", () => {
+    const entries = Array.from({ length: 7 }, (_, i) => ({ selector: `.item-${i}`, action: "hover" }));
+    const m = parseFocusManifest({ review: { visual: { interactions: entries } } });
+    expect(m.review.visual.interactions).toHaveLength(5);
+    expect(m.review.visual.interactions.map((i) => i.selector)).toEqual([".item-0", ".item-1", ".item-2", ".item-3", ".item-4"]);
+    expect(m.warnings.some((w) => /review\.visual\.interactions.*capped at 5 entries/.test(w))).toBe(true);
+  });
+
+  it("resolveReviewVisualConfig passes a configured interactions list through", () => {
+    const manifest = parseFocusManifest({ review: { visual: { interactions: [{ selector: ".x", action: "hover" }] } } });
+    expect(resolveReviewVisualConfig(manifest).interactions).toEqual([{ selector: ".x", action: "hover", dragTo: null, path: null, label: null }]);
+  });
+
+  it("overlay: a per-repo interactions list wins over a global-default list", () => {
+    const globalDefault = parseReviewConfigMapping({ visual: { interactions: [{ selector: ".global", action: "hover" }] } }, []);
+    const perRepo = parseReviewConfigMapping({ visual: { interactions: [{ selector: ".repo", action: "click" }] } }, []);
+    expect(overlayReviewConfig(globalDefault, perRepo).visual.interactions).toEqual([{ selector: ".repo", action: "click", dragTo: null, path: null, label: null }]);
+  });
+
+  it("overlay: an unset per-repo interactions list falls back to the global-default list", () => {
+    const globalDefault = parseReviewConfigMapping({ visual: { interactions: [{ selector: ".global", action: "hover" }] } }, []);
+    const perRepo = parseReviewConfigMapping({ visual: { routes: { paths: ["/app"] } } }, []);
+    expect(overlayReviewConfig(globalDefault, perRepo).visual.interactions).toEqual([{ selector: ".global", action: "hover", dragTo: null, path: null, label: null }]);
+    expect(overlayReviewConfig(globalDefault, perRepo).visual.routes.paths).toEqual(["/app"]);
+  });
+});
+
 describe("review.pre_merge_checks (#review-pre-merge-checks)", () => {
   it("parses checks (name + assertions + when_paths + enforce), marks present, and round-trips", () => {
     const m = parseFocusManifest({

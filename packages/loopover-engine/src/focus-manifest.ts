@@ -3647,6 +3647,15 @@ export function reviewConfigToJson(review: FocusManifestReviewConfig): JsonValue
     if (review.visual.enabled !== null) visual.enabled = review.visual.enabled;
     if (review.visual.themeStorageKey !== null) visual.theme_storage_key = review.visual.themeStorageKey;
     if (review.visual.actionsFallback) visual.actions_fallback = true;
+    if (review.visual.interactions.length > 0) {
+      visual.interactions = review.visual.interactions.map((interaction) => {
+        const entry: Record<string, JsonValue> = { selector: interaction.selector, action: interaction.action };
+        if (interaction.dragTo !== null) entry.drag_to = interaction.dragTo;
+        if (interaction.path !== null) entry.path = interaction.path;
+        if (interaction.label !== null) entry.label = interaction.label;
+        return entry;
+      });
+    }
     out.visual = visual;
   }
   if (review.linkedIssueSatisfaction !== null) out.linkedIssueSatisfaction = review.linkedIssueSatisfaction;

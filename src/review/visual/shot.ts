@@ -446,7 +446,6 @@ export async function captureScrollFrames(env: Env, url: string, viewport: Viewp
 // into an unbounded "record everything" system. One extra frame at rest (step 0, before the interaction
 // fires) plus 3 post-interaction frames covers "mid-transition" and "settled" without much added cost.
 const MAX_INTERACTION_STEPS = 4;
-const INTERACTION_SETTLE_MS = 350;
 const INTERACTION_ELEMENT_TIMEOUT_MS = 3_000;
 // A drag needs enough intermediate mouse-move events for a drag-and-drop library's own dragover/mousemove
 // listeners to register motion (a single instant jump from source to destination often fails to trigger a
@@ -457,22 +456,29 @@ const DRAG_MOVE_STEPS = 8;
 
 export type InteractionAction = "hover" | "click" | "drag";
 
-async function waitForInteractionSettle(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, INTERACTION_SETTLE_MS));
-}
-
 /** Drag `source` onto `destination` via a real mouse-down → interpolated-move → mouse-up sequence, using each
  *  element's own bounding-box CENTER as the drag/drop point. A `null` bounding box (a display:none or
  *  zero-size element) means there is nothing visibly draggable to animate — a no-op, not an error, matching
  *  this whole capture mode's fail-open contract. Interpolating {@link DRAG_MOVE_STEPS} intermediate positions
  *  (rather than one instant jump) mirrors how a real user drags and is what most drag-and-drop libraries'
- *  own dragover/mousemove listeners need to actually register motion and highlight a drop target. */
+ *  own dragover/mousemove listeners need to actually register motion and highlight a drop target.
+ *
+ *  Scrolls each element into view (sequentially, before reading ITS OWN bounding box) the same way Puppeteer's
+ *  own `hover()`/`click()` do internally for a single element — `boundingBox()` alone does not scroll, so a
+ *  drag source/destination below the fold (the documented use case: "a reorderable list/kanban card") would
+ *  otherwise read a stale/off-viewport position and target the wrong screen point. Scrolling to the
+ *  destination after already reading the source's box is safe even if it scrolls the source back out of
+ *  view — the source's coordinates were already captured and the mouse sequence below uses those fixed
+ *  numbers, not a live re-query. */
 async function performDrag(
   page: { mouse: { move: (x: number, y: number) => Promise<void>; down: () => Promise<void>; up: () => Promise<void> } },
-  source: { boundingBox: () => Promise<{ x: number; y: number; width: number; height: number } | null> },
-  destination: { boundingBox: () => Promise<{ x: number; y: number; width: number; height: number } | null> },
+  source: { boundingBox: () => Promise<{ x: number; y: number; width: number; height: number } | null>; scrollIntoViewIfNeeded?: () => Promise<void> },
+  destination: { boundingBox: () => Promise<{ x: number; y: number; width: number; height: number } | null>; scrollIntoViewIfNeeded?: () => Promise<void> },
 ): Promise<void> {
-  const [sourceBox, destinationBox] = await Promise.all([source.boundingBox(), destination.boundingBox()]);
+  await source.scrollIntoViewIfNeeded?.().catch(() => undefined);
+  const sourceBox = await source.boundingBox();
+  await destination.scrollIntoViewIfNeeded?.().catch(() => undefined);
+  const destinationBox = await destination.boundingBox();
   if (!sourceBox || !destinationBox) return;
   const sourceX = sourceBox.x + sourceBox.width / 2;
   const sourceY = sourceBox.y + sourceBox.height / 2;
@@ -585,7 +591,10 @@ export async function captureInteractionFrames(
       await performDrag(page, element, dragToElement!);
     }
     for (let step = 1; step < MAX_INTERACTION_STEPS; step++) {
-      await waitForInteractionSettle();
+      // Reuses captureScrollFrames' own settle delay (SCROLL_SETTLE_MS/waitForScrollSettle above) rather than
+      // a second, numerically-identical constant+function -- same 350ms "long enough for a typical transition,
+      // short enough to stay a quick evidence clip" reasoning applies to a post-interaction frame too.
+      await waitForScrollSettle();
       frames.push((await page.screenshot({ type: "png", fullPage: false })) as Uint8Array);
     }
     return { frames, authWalled: false };
