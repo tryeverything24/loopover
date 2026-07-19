@@ -4,15 +4,21 @@ import { dirname, join } from "node:path";
 import { resolveEventLedgerDbPath } from "../../packages/loopover-miner/lib/event-ledger.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  buildEngineResolvesCheck,
   buildEngineVersionDisplay,
   buildEngineVersionSkewCheck,
   checkConfigContent,
+  checkStateDirWritable,
   collectStatus,
   compareInstalledEngineVersion,
+  readDeclaredEngineDependencyRange,
   readExpectedEnginePackageVersion,
   readExpectedEnginePackageVersionFromPaths,
   readInstalledEnginePackageVersion,
   readInstalledEnginePackageVersionFromPaths,
+  renderDriverLine,
+  renderStatusText,
+  requiredNodeMajor,
   resolveMinerStateDir,
   runDoctor,
   runDoctorChecks,
@@ -83,6 +89,36 @@ describe("loopover-miner status/doctor (#2288)", () => {
 
   it("REGRESSION: buildEngineVersionDisplay falls back to the declared dependency range when real resolution comes up empty", () => {
     expect(buildEngineVersionDisplay(() => null)).toBe(DECLARED_ENGINE_DEPENDENCY_RANGE);
+  });
+
+  describe("readDeclaredEngineDependencyRange", () => {
+    it("reads the real declared range by default", () => {
+      expect(readDeclaredEngineDependencyRange()).toBe(DECLARED_ENGINE_DEPENDENCY_RANGE);
+    });
+
+    it("returns null when the injected package.json has no matching dependency entry", () => {
+      expect(readDeclaredEngineDependencyRange(() => ({ dependencies: {} }))).toBeNull();
+      expect(readDeclaredEngineDependencyRange(() => ({}))).toBeNull();
+    });
+
+    it("returns null when the package.json lookup throws", () => {
+      expect(
+        readDeclaredEngineDependencyRange(() => {
+          throw new Error("cannot resolve package.json");
+        }),
+      ).toBeNull();
+    });
+  });
+
+  it("readInstalledEnginePackageVersion falls back to the monorepo workspace engine package.json when real resolution fails", () => {
+    // This IS the monorepo, so the real workspace loopover-engine/package.json genuinely exists -- forcing
+    // resolution to fail still finds a real version through the same workspace fallback
+    // readInstalledEnginePackageVersionFromPaths already covers directly.
+    expect(
+      readInstalledEnginePackageVersion(() => {
+        throw new Error("resolution blocked");
+      }),
+    ).toMatch(/^\d+\.\d+\.\d+/);
   });
 
   it("collectStatus prefers LOOPOVER_MINER_VERSION over package.json (#4310)", () => {
@@ -216,6 +252,64 @@ describe("loopover-miner status/doctor (#2288)", () => {
     expect(readExpectedEnginePackageVersion()).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
+  it("compareInstalledEngineVersion treats an unparseable version as behind (-1), the safe default", () => {
+    expect(compareInstalledEngineVersion("not-a-version", "0.2.0")).toBe(-1);
+    expect(compareInstalledEngineVersion("0.2.0", "also-not-a-version")).toBe(-1);
+    expect(compareInstalledEngineVersion("not-a-version", "also-not-a-version")).toBe(-1);
+  });
+
+  it("requiredNodeMajor falls back to 0 when engines.node is missing or not a version-shaped string", () => {
+    expect(requiredNodeMajor(() => undefined)).toBe(0);
+    expect(requiredNodeMajor(() => ({}))).toBe(0);
+    expect(requiredNodeMajor(() => ({ node: "not-a-version" }))).toBe(0);
+    expect(requiredNodeMajor()).toBeGreaterThan(0); // real package.json still resolves the true floor
+  });
+
+  it("buildEngineResolvesCheck fails (not resolvable) when the engine version genuinely cannot be resolved", () => {
+    expect(buildEngineResolvesCheck(() => null)).toEqual({
+      name: "engine-resolves",
+      ok: false,
+      detail: "@loopover/engine not resolvable",
+    });
+  });
+
+  it("checkStateDirWritable reports a generic 'not writable' detail when a non-Error value is thrown", () => {
+    const result = checkStateDirWritable("/whatever/state/dir", {
+      mkdirSync: () => undefined,
+      writeFileSync: () => {
+        throw "boom (not an Error instance)";
+      },
+      rmSync: () => undefined,
+    });
+    expect(result).toEqual({ name: "state-dir-writable", ok: false, detail: "/whatever/state/dir: not writable" });
+  });
+
+  it("renderDriverLine renders every branch: none configured, cliPresent null/false/true, modelEnvVar present/absent", () => {
+    expect(renderDriverLine({ provider: null, modelEnvVar: null, cliPresent: null })).toBe("driver: none configured");
+    expect(renderDriverLine({ provider: "agent-sdk", modelEnvVar: null, cliPresent: null })).toBe(
+      "driver: agent-sdk (CLI present: n/a)",
+    );
+    expect(renderDriverLine({ provider: "claude-cli", modelEnvVar: null, cliPresent: false })).toBe(
+      "driver: claude-cli (CLI present: no)",
+    );
+    expect(
+      renderDriverLine({ provider: "claude-cli", modelEnvVar: "MINER_CODING_AGENT_CLAUDE_MODEL", cliPresent: true }),
+    ).toBe("driver: claude-cli (CLI present: yes, model env: MINER_CODING_AGENT_CLAUDE_MODEL)");
+  });
+
+  it("renderStatusText falls back to 'unknown'/'unresolved' when package/engine versions are unavailable", () => {
+    const text = renderStatusText({
+      package: { name: "@loopover/miner", version: null },
+      engine: { name: "@loopover/engine", version: null },
+      node: process.version,
+      stateDir: "/s",
+      configFile: null,
+      driver: { provider: null, modelEnvVar: null, cliPresent: null },
+    });
+    expect(text).toContain("@loopover/miner unknown");
+    expect(text).toContain("engine: @loopover/engine unresolved");
+  });
+
   it("buildEngineVersionSkewCheck skips when expected version is unavailable", () => {
     const skewCheck = buildEngineVersionSkewCheck(
       () => "0.2.0",
@@ -248,6 +342,20 @@ describe("loopover-miner status/doctor (#2288)", () => {
     expect(readExpectedEnginePackageVersionFromPaths(join(root, "broken.json"), pinFile)).toBeNull();
   });
 
+  it("readExpectedEnginePackageVersionFromPaths returns null when the monorepo package.json parses but has no version field", () => {
+    const root = tempRoot();
+    const monorepoPkg = join(root, "engine-package-no-version.json");
+    writeFileSync(monorepoPkg, JSON.stringify({ name: "no-version" }));
+    expect(readExpectedEnginePackageVersionFromPaths(monorepoPkg, join(root, "unused-pin"))).toBeNull();
+  });
+
+  it("readExpectedEnginePackageVersionFromPaths returns null when the pin file is present but blank", () => {
+    const root = tempRoot();
+    const pinFile = join(root, "expected-engine.version");
+    writeFileSync(pinFile, "   \n");
+    expect(readExpectedEnginePackageVersionFromPaths(join(root, "missing-monorepo-pkg.json"), pinFile)).toBeNull();
+  });
+
   it("readInstalledEnginePackageVersionFromPaths falls back to the workspace engine package", () => {
     const root = tempRoot();
     const workspacePkg = join(root, "loopover-engine-package.json");
@@ -261,6 +369,23 @@ describe("loopover-miner status/doctor (#2288)", () => {
     mkdirSync(join(root, "installed"), { recursive: true });
     writeFileSync(installedPkg, JSON.stringify({ version: "0.2.1" }));
     expect(readInstalledEnginePackageVersionFromPaths(join(root, "installed", "index.js"), workspacePkg)).toBe("0.2.1");
+  });
+
+  it("readInstalledEnginePackageVersionFromPaths skips a candidate package.json that parses but has no version field, then falls back to the workspace", () => {
+    const root = tempRoot();
+    const installedDir = join(root, "installed-no-version");
+    mkdirSync(installedDir, { recursive: true });
+    writeFileSync(join(installedDir, "package.json"), JSON.stringify({ name: "no-version-here" }));
+    const workspacePkg = join(root, "loopover-engine-package.json");
+    writeFileSync(workspacePkg, JSON.stringify({ version: "0.9.9" }));
+    expect(readInstalledEnginePackageVersionFromPaths(join(installedDir, "index.js"), workspacePkg)).toBe("0.9.9");
+  });
+
+  it("readInstalledEnginePackageVersionFromPaths returns null when the workspace package.json parses but has no version field", () => {
+    const root = tempRoot();
+    const workspacePkg = join(root, "loopover-engine-package-no-version.json");
+    writeFileSync(workspacePkg, JSON.stringify({ name: "no-version" }));
+    expect(readInstalledEnginePackageVersionFromPaths("/missing/entry", workspacePkg)).toBeNull();
   });
 
   it("runDoctor supports --json output", () => {

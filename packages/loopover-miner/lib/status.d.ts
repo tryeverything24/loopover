@@ -41,18 +41,52 @@ export declare function resolveMinerStateDir(env?: Record<string, string | undef
  * succeeding is the only realistic case in a working install, so the fallback path needs a way to force it.
  */
 export declare function buildEngineVersionDisplay(readInstalled?: () => string | null): string | null;
+/** The declared `@loopover/engine` dependency RANGE from this package's own package.json (e.g. "^3.2.1") --
+ *  `buildEngineVersionDisplay`'s fallback when real resolution comes up empty. Split out (rather than inlined
+ *  in `buildEngineVersionDisplay`) so its own require/parse failure path is independently testable via an
+ *  injected `readPackageJson`, the same FsDeps-style seam the rest of this file already uses. */
+export declare function readDeclaredEngineDependencyRange(readPackageJson?: () => {
+    dependencies?: Record<string, string>;
+}): string | null;
 export declare function readInstalledEnginePackageVersionFromPaths(resolvedEntry: string, workspacePkg: string, deps?: FsDeps): string | null;
-/** Installed @loopover/engine semver from node_modules (not the declared dependency range). */
-export declare function readInstalledEnginePackageVersion(): string | null;
+/** Installed @loopover/engine semver from node_modules (not the declared dependency range). `resolveEnginePackageEntry`
+ *  is injectable (mirrors the rest of this file's FsDeps-style seams) so the "real resolution failed" fallback is
+ *  independently testable without needing the actual install to be broken. */
+export declare function readInstalledEnginePackageVersion(resolveEnginePackageEntry?: () => string): string | null;
 /** Expected minimum engine semver: monorepo engine package.json when present, else the shipped pin file. */
 export declare function readExpectedEnginePackageVersionFromPaths(monorepoEnginePkg: string, pinFile: string, deps?: FsDeps): string | null;
 export declare function readExpectedEnginePackageVersion(): string | null;
 /** Returns -1 when installed is behind expected, 0 when equal, 1 when ahead. */
 export declare function compareInstalledEngineVersion(installed: string, expected: string): -1 | 0 | 1;
 export declare function buildEngineVersionSkewCheck(readInstalled?: () => string | null, readExpected?: () => string | null): DoctorCheck;
+/** The `engine-resolves` doctor check (#2288). Extracted + injectable to match `buildEngineVersionSkewCheck`'s
+ *  own shape -- the "genuinely unresolvable" (`ok: false`) branch can't be reached in a real working monorepo
+ *  install, so it needs the same seam to be independently testable. */
+export declare function buildEngineResolvesCheck(readEngineVersionImpl?: () => string | null): DoctorCheck;
+/** The minimum Node major version from the package's `engines.node` floor (e.g. ">=22.13.0" → 22). `readEngines`
+ *  is injectable so the "missing/malformed engines.node" fallback (0) is independently testable. */
+export declare function requiredNodeMajor(readEngines?: () => {
+    node?: string;
+} | undefined): number;
 /** Gather the read-only status snapshot. Pure w.r.t. its (env, cwd) inputs — no writes, no network. */
 export declare function collectStatus(env?: Record<string, string | undefined>, cwd?: string): MinerStatus;
+export declare function renderDriverLine(driver: MinerDriverStatus): string;
+export declare function renderStatusText(status: MinerStatus): string;
 export declare function runStatus(args?: string[], env?: Record<string, string | undefined>, cwd?: string): number;
+type StateDirWritableDeps = {
+    mkdirSync: (path: string, options: {
+        recursive: boolean;
+        mode: number;
+    }) => unknown;
+    writeFileSync: (path: string, data: string) => unknown;
+    rmSync: (path: string, options: {
+        force: boolean;
+    }) => unknown;
+};
+/** `deps` is injectable (FsDeps-style) so the "non-Error thrown value" defensive fallback in the detail message
+ *  is independently testable -- real fs errors are always Error instances, so that branch can't be reached
+ *  through a real mkdir/write/rm failure alone. */
+export declare function checkStateDirWritable(stateDir: string, deps?: StateDirWritableDeps): DoctorCheck;
 /** Validate the discovered `.loopover-miner` config's CONTENT (#4873), not just its path: parse it with the
  *  tolerant goal-spec parser and surface its warnings, so a malformed config is flagged by `doctor` rather than
  *  silently degrading to defaults. No config file is fine (defaults apply); a read failure is reported. `readImpl`

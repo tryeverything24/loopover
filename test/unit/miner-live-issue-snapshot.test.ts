@@ -194,4 +194,45 @@ describe("fetchLiveIssueSnapshot (#5132)", () => {
     expect(timeoutSpy.mock.calls).toEqual([[10_000], [10_000], [10_000]]);
     timeoutSpy.mockRestore();
   });
+
+  it("sends no authorization header when githubToken is a non-string value (a defensive, non-TS-reachable input)", async () => {
+    let capturedHeaders: HeadersInit | undefined;
+    const fetchImpl = async (_url: string, init: RequestInit) => {
+      capturedHeaders = init.headers;
+      return { ok: true, status: 200, json: async () => ({ data: { repository: { issue: { state: "OPEN", closedByPullRequestsReferences: { nodes: [] } } } } }) } as Response;
+    };
+    await fetchLiveIssueSnapshot("acme/widgets", 7, { githubToken: 12345 as unknown as string, fetchImpl });
+    expect((capturedHeaders as Record<string, string>).authorization).toBeUndefined();
+  });
+
+  it("returns null for a well-formed-but-invalid repoFullName: missing owner, missing repo, or extra path segments", async () => {
+    expect(await fetchLiveIssueSnapshot("/repo-only", 1, { fetchImpl: graphqlResponse({}) })).toBeNull();
+    expect(await fetchLiveIssueSnapshot("owner/", 1, { fetchImpl: graphqlResponse({}) })).toBeNull();
+    expect(await fetchLiveIssueSnapshot("owner/repo/extra", 1, { fetchImpl: graphqlResponse({}) })).toBeNull();
+  });
+
+  it("returns null for a non-string repoFullName (a defensive, non-TS-reachable input -- e.g. a caller that skipped type-checking)", async () => {
+    expect(await fetchLiveIssueSnapshot(42 as unknown as string, 1, { fetchImpl: graphqlResponse({}) })).toBeNull();
+    expect(await fetchLiveIssueSnapshot(null as unknown as string, 1, { fetchImpl: graphqlResponse({}) })).toBeNull();
+  });
+
+  it("treats a missing/non-array closedByPullRequestsReferences.nodes as zero referencing PRs", async () => {
+    const snapshot = await fetchLiveIssueSnapshot("acme/widgets", 7, {
+      fetchImpl: graphqlResponse({ data: { repository: { issue: { state: "OPEN" } } } }),
+    });
+    expect(snapshot).toEqual({ state: "open", referencingPrs: [] });
+  });
+
+  it("uses the real global fetch when no fetchImpl is provided (default wiring, stubbed to avoid a real network call)", async () => {
+    const fetchStub = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { repository: { issue: { state: "OPEN", closedByPullRequestsReferences: { nodes: [] } } } } }),
+    }));
+    vi.stubGlobal("fetch", fetchStub);
+    const snapshot = await fetchLiveIssueSnapshot("acme/widgets", 7, {});
+    expect(snapshot).toEqual({ state: "open", referencingPrs: [] });
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
+  });
 });

@@ -18,6 +18,7 @@ import {
 import {
   closeDefaultEventLedger,
   initEventLedger,
+  type LedgerEntry,
 } from "../../packages/loopover-miner/lib/event-ledger.js";
 import {
   closeDefaultPortfolioQueueStore,
@@ -47,6 +48,7 @@ afterEach(() => {
   closeDefaultEventLedger();
   closeDefaultRunStateStore();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -56,6 +58,51 @@ describe("loopover-miner manage status (#2325)", () => {
     expect(parseManagedPrIdentifier("issue:42")).toBeNull();
     expect(formatManagedPrIdentifier(42)).toBe("pr:42");
     expect(() => formatManagedPrIdentifier(0)).toThrow("invalid_pr_number");
+  });
+
+  it("parseManagedPrIdentifier rejects a non-string identifier and a zero PR number", () => {
+    expect(parseManagedPrIdentifier(123 as unknown as string)).toBeNull();
+    expect(parseManagedPrIdentifier(undefined as unknown as string)).toBeNull();
+    expect(parseManagedPrIdentifier("pr:0")).toBeNull(); // matches the regex but fails the > 0 check
+  });
+
+  it("indexLatestManageUpdates skips non-array input, non-manage-update events, events with an invalid repoFullName, and non-object/array/null payloads", () => {
+    const malformedEvents = [
+      { type: "something_else", repoFullName: "acme/x", payload: { prNumber: 1 } },
+      { type: MANAGE_PR_UPDATE_EVENT, repoFullName: "", payload: { prNumber: 1 } },
+      { type: MANAGE_PR_UPDATE_EVENT, repoFullName: "   ", payload: { prNumber: 1 } },
+      { type: MANAGE_PR_UPDATE_EVENT, repoFullName: 42, payload: { prNumber: 1 } },
+      { type: MANAGE_PR_UPDATE_EVENT, repoFullName: "acme/x", payload: null },
+      { type: MANAGE_PR_UPDATE_EVENT, repoFullName: "acme/x", payload: undefined },
+      { type: MANAGE_PR_UPDATE_EVENT, repoFullName: "acme/x", payload: "not-an-object" },
+      { type: MANAGE_PR_UPDATE_EVENT, repoFullName: "acme/x", payload: [] },
+    ] as unknown as LedgerEntry[];
+    expect(indexLatestManageUpdates(malformedEvents).size).toBe(0);
+    expect(indexLatestManageUpdates(null as unknown as LedgerEntry[]).size).toBe(0);
+    expect(indexLatestManageUpdates(undefined as unknown as LedgerEntry[]).size).toBe(0);
+  });
+
+  it("normalizes optional manage-update fields: missing/null/non-string values all normalize to null, whitespace trims to null", () => {
+    const { portfolioQueue, eventLedger } = tempStores();
+    portfolioQueue.enqueue({ repoFullName: "acme/x", identifier: "pr:1", priority: 1 });
+    eventLedger.appendEvent({
+      type: MANAGE_PR_UPDATE_EVENT,
+      repoFullName: "acme/x",
+      // gateVerdict is intentionally omitted (not set to undefined): appendEvent's own JSON round-trip check
+      // rejects a payload containing an explicit `undefined` value, but an omitted key parses back identically
+      // (record.gateVerdict === undefined either way), so this still exercises optionalString's undefined path.
+      payload: { prNumber: 1, branch: "  feat/a  ", ciState: null, outcome: 42, lastPolledAt: "   " },
+    });
+    const rows = collectManageStatus({ portfolioQueue, eventLedger });
+    expect(rows).toEqual([
+      expect.objectContaining({
+        branch: "feat/a", // trimmed
+        ciState: null, // explicit null
+        gateVerdict: null, // undefined
+        outcome: null, // wrong type (number)
+        lastPolledAt: null, // whitespace-only trims to empty -> null
+      }),
+    ]);
   });
 
   it("returns an empty snapshot for an empty portfolio and ledger", () => {
@@ -317,5 +364,14 @@ describe("loopover-miner manage status (#2325)", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     expect(runManageStatus(["acme/widgets"])).toBe(2);
     expect(String(error.mock.calls[0]?.[0])).toContain("Usage: loopover-miner manage status [--json]");
+  });
+
+  it("without explicit options, owns and initializes the real default stores, then closes them (#2325 default init path)", () => {
+    const root = mkdtempSync(join(tmpdir(), "loopover-miner-manage-status-default-"));
+    roots.push(root);
+    vi.stubEnv("LOOPOVER_MINER_CONFIG_DIR", root);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    expect(runManageStatus([])).toBe(0);
+    expect(String(log.mock.calls[0]?.[0])).toContain("no managed pull requests");
   });
 });

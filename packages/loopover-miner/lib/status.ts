@@ -112,8 +112,19 @@ export function resolveMinerStateDir(env: Record<string, string | undefined> = p
 export function buildEngineVersionDisplay(readInstalled: () => string | null = readInstalledEnginePackageVersion): string | null {
   const installed = readInstalled();
   if (installed) return installed;
+  return readDeclaredEngineDependencyRange();
+}
+
+/** The declared `@loopover/engine` dependency RANGE from this package's own package.json (e.g. "^3.2.1") --
+ *  `buildEngineVersionDisplay`'s fallback when real resolution comes up empty. Split out (rather than inlined
+ *  in `buildEngineVersionDisplay`) so its own require/parse failure path is independently testable via an
+ *  injected `readPackageJson`, the same FsDeps-style seam the rest of this file already uses. */
+export function readDeclaredEngineDependencyRange(
+  readPackageJson: () => { dependencies?: Record<string, string> } = () =>
+    requireFromHere()("../package.json") as { dependencies?: Record<string, string> },
+): string | null {
   try {
-    const pkg = requireFromHere()("../package.json") as { dependencies?: Record<string, string> };
+    const pkg = readPackageJson();
     return pkg.dependencies?.[ENGINE_PACKAGE] ?? null;
   } catch {
     return null;
@@ -149,24 +160,25 @@ export function readInstalledEnginePackageVersionFromPaths(
   return null;
 }
 
-/** Installed @loopover/engine semver from node_modules (not the declared dependency range). */
-export function readInstalledEnginePackageVersion(): string | null {
+/** Installed @loopover/engine semver from node_modules (not the declared dependency range). `resolveEnginePackageEntry`
+ *  is injectable (mirrors the rest of this file's FsDeps-style seams) so the "real resolution failed" fallback is
+ *  independently testable without needing the actual install to be broken. */
+export function readInstalledEnginePackageVersion(
+  resolveEnginePackageEntry: () => string = () => requireFromHere().resolve(ENGINE_PACKAGE),
+): string | null {
+  const workspacePkg = join(moduleDir(), "../../loopover-engine/package.json");
+  let resolvedEntry: string;
   try {
-    return readInstalledEnginePackageVersionFromPaths(
-      requireFromHere().resolve(ENGINE_PACKAGE),
-      join(moduleDir(), "../../loopover-engine/package.json"),
-    );
+    resolvedEntry = resolveEnginePackageEntry();
   } catch {
-    const workspacePkg = join(moduleDir(), "../../loopover-engine/package.json");
-    if (existsSync(workspacePkg)) {
-      try {
-        return (JSON.parse(readFileSync(workspacePkg, "utf8")) as { version?: string }).version ?? null;
-      } catch {
-        return null;
-      }
-    }
-    return null;
+    // Real resolution failed (the engine package's `exports` map blocks it, or its built `dist` is absent
+    // depending on build order -- see buildEngineVersionDisplay's doc). There's no real entry path to derive
+    // package.json candidates from; readInstalledEnginePackageVersionFromPaths's own workspace fallback already
+    // handles "no candidate exists" (existsSync is simply false for a made-up path), so reuse it with a sentinel
+    // here instead of hand-duplicating that same fallback a second time.
+    resolvedEntry = join(moduleDir(), "__engine_resolve_failed__", "index.js");
   }
+  return readInstalledEnginePackageVersionFromPaths(resolvedEntry, workspacePkg);
 }
 
 /** Expected minimum engine semver: monorepo engine package.json when present, else the shipped pin file. */
@@ -246,10 +258,25 @@ function checkEngineVersionSkew(): DoctorCheck {
   return buildEngineVersionSkewCheck();
 }
 
-/** The minimum Node major version from the package's `engines.node` floor (e.g. ">=22.13.0" → 22). */
-function requiredNodeMajor(): number {
-  const pkg = requireFromHere()("../package.json") as { engines?: { node?: string } };
-  const engines = pkg.engines;
+/** The `engine-resolves` doctor check (#2288). Extracted + injectable to match `buildEngineVersionSkewCheck`'s
+ *  own shape -- the "genuinely unresolvable" (`ok: false`) branch can't be reached in a real working monorepo
+ *  install, so it needs the same seam to be independently testable. */
+export function buildEngineResolvesCheck(readEngineVersionImpl: () => string | null = readEngineVersion): DoctorCheck {
+  const engineVersion = readEngineVersionImpl();
+  return {
+    name: "engine-resolves",
+    ok: engineVersion !== null,
+    detail: engineVersion ? `${ENGINE_PACKAGE} ${engineVersion}` : `${ENGINE_PACKAGE} not resolvable`,
+  };
+}
+
+/** The minimum Node major version from the package's `engines.node` floor (e.g. ">=22.13.0" → 22). `readEngines`
+ *  is injectable so the "missing/malformed engines.node" fallback (0) is independently testable. */
+export function requiredNodeMajor(
+  readEngines: () => { node?: string } | undefined = () =>
+    (requireFromHere()("../package.json") as { engines?: { node?: string } }).engines,
+): number {
+  const engines = readEngines();
   const match = typeof engines?.node === "string" ? engines.node.match(/(\d+)/) : null;
   return match ? Number(match[1]) : 0;
 }
@@ -292,14 +319,14 @@ export function collectStatus(env: Record<string, string | undefined> = process.
   };
 }
 
-function renderDriverLine(driver: MinerDriverStatus): string {
+export function renderDriverLine(driver: MinerDriverStatus): string {
   if (!driver.provider) return "driver: none configured";
   const cliText = driver.cliPresent === null ? "n/a" : driver.cliPresent ? "yes" : "no";
   const modelText = driver.modelEnvVar ? `, model env: ${driver.modelEnvVar}` : "";
   return `driver: ${driver.provider} (CLI present: ${cliText}${modelText})`;
 }
 
-function renderStatusText(status: MinerStatus): string {
+export function renderStatusText(status: MinerStatus): string {
   return [
     `${status.package.name} ${status.package.version ?? "unknown"} (node ${status.node})`,
     `engine: ${status.engine.name} ${status.engine.version ?? "unresolved"}`,
@@ -315,14 +342,26 @@ export function runStatus(args: string[] = [], env: Record<string, string | unde
   return 0;
 }
 
-function checkStateDirWritable(stateDir: string): DoctorCheck {
+type StateDirWritableDeps = {
+  mkdirSync: (path: string, options: { recursive: boolean; mode: number }) => unknown;
+  writeFileSync: (path: string, data: string) => unknown;
+  rmSync: (path: string, options: { force: boolean }) => unknown;
+};
+
+/** `deps` is injectable (FsDeps-style) so the "non-Error thrown value" defensive fallback in the detail message
+ *  is independently testable -- real fs errors are always Error instances, so that branch can't be reached
+ *  through a real mkdir/write/rm failure alone. */
+export function checkStateDirWritable(
+  stateDir: string,
+  deps: StateDirWritableDeps = { mkdirSync, writeFileSync, rmSync },
+): DoctorCheck {
   const probe = join(stateDir, ".loopover-miner-write-probe");
   try {
     // Creating the dir and writing (then removing) a probe file proves it is writable — the state dir must be
     // creatable/writable for the local SQLite stores to work.
-    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-    writeFileSync(probe, "");
-    rmSync(probe, { force: true });
+    deps.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    deps.writeFileSync(probe, "");
+    deps.rmSync(probe, { force: true });
     return { name: "state-dir-writable", ok: true, detail: stateDir };
   } catch (error) {
     return {
@@ -457,18 +496,13 @@ export function checkCodingAgentCredential(
 export function runDoctorChecks(env: Record<string, string | undefined> = process.env, cwd: string = process.cwd()): DoctorCheck[] {
   const nodeMajor = Number(process.versions.node.split(".")[0]);
   const requiredMajor = requiredNodeMajor();
-  const engineVersion = readEngineVersion();
   return [
     {
       name: "node-version",
       ok: nodeMajor >= requiredMajor,
       detail: `node ${process.version} (requires >= ${requiredMajor})`,
     },
-    {
-      name: "engine-resolves",
-      ok: engineVersion !== null,
-      detail: engineVersion ? `${ENGINE_PACKAGE} ${engineVersion}` : `${ENGINE_PACKAGE} not resolvable`,
-    },
+    buildEngineResolvesCheck(),
     checkEngineVersionSkew(),
     checkStateDirWritable(resolveMinerStateDir(env)),
     checkLaptopStateSqlite(env),
