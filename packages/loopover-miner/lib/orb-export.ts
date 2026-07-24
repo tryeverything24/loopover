@@ -1,9 +1,9 @@
 import { chmodSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, createHmac } from "node:crypto";
 import { generateAnonSecret, hmacAnonymize as engineHmacAnonymize } from "@loopover/engine";
+import { resolveLocalStoreDbPath } from "./local-store.js";
 import { readPrOutcomes } from "./pr-outcome.js";
 import type { NormalizedPrOutcomePayload, PrOutcomeLedgerReader } from "./pr-outcome.js";
 import { initEventLedger } from "./event-ledger.js";
@@ -52,19 +52,7 @@ const CURSOR_KEY = "export_cursor";
 const defaultDbFileName = "orb-export.sqlite3";
 
 export function resolveOrbExportDbPath(env: Record<string, string | undefined> = process.env): string {
-  const explicitPath =
-    typeof env.LOOPOVER_MINER_ORB_EXPORT_DB === "string" ? env.LOOPOVER_MINER_ORB_EXPORT_DB.trim() : "";
-  if (explicitPath) return explicitPath;
-
-  const explicitConfigDir =
-    typeof env.LOOPOVER_MINER_CONFIG_DIR === "string" ? env.LOOPOVER_MINER_CONFIG_DIR.trim() : "";
-  if (explicitConfigDir) return join(explicitConfigDir, defaultDbFileName);
-
-  const configHome =
-    typeof env.XDG_CONFIG_HOME === "string" && env.XDG_CONFIG_HOME.trim()
-      ? env.XDG_CONFIG_HOME.trim()
-      : join(homedir(), ".config");
-  return join(configHome, "loopover-miner", defaultDbFileName);
+  return resolveLocalStoreDbPath(defaultDbFileName, "LOOPOVER_MINER_ORB_EXPORT_DB", env);
 }
 
 // `dbPath` is always a real string here: this function's only caller (openOrbExportStore) already defaults its
